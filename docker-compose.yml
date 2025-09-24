@@ -1,89 +1,141 @@
 version: '3.8'
 
 services:
-  barter:
+  # Main trading strategy service
+  barter-strategy:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: barter-trading
+    image: ghcr.io/taoseekai/barter-strategy:latest
+    container_name: barter-strategy
     restart: unless-stopped
     environment:
-      - RUST_LOG=info
-      - RUST_BACKTRACE=1
+      - RUST_LOG=${RUST_LOG:-info}
+      - RUST_BACKTRACE=${RUST_BACKTRACE:-1}
+      - TRADING_MODE=${TRADING_MODE:-test}
+      - EXCHANGE_API_KEY=${EXCHANGE_API_KEY}
+      - EXCHANGE_API_SECRET=${EXCHANGE_API_SECRET}
+      - FLUVIO_URL=fluvio:9003
     volumes:
-      - ./config:/home/appuser/config:ro
-      - ./data:/home/appuser/data
-      - ./logs:/home/appuser/logs
-    ports:
-      - "18080:8080"  # Using 18080 to avoid conflicts
+      - ./config:/opt/barter/config
+      - ./data:/opt/barter/data
+      - ./logs:/opt/barter/logs
+    depends_on:
+      - fluvio
+      - redis
     networks:
       - barter-network
-    healthcheck:
-      test: ["CMD", "pgrep", "barter"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
+    command: ["barter-strategy"]
 
-  # Optional: Redis for caching market data
+  # Fluvio streaming platform
+  fluvio:
+    image: infinyon/fluvio:latest
+    container_name: fluvio
+    restart: unless-stopped
+    ports:
+      - "9003:9003"  # SC port
+      - "9005:9005"  # SPU port
+    environment:
+      - FLUVIO_SC_LOG=${FLUVIO_LOG:-info}
+    volumes:
+      - fluvio-data:/var/lib/fluvio
+    networks:
+      - barter-network
+    command: ["run", "sc", "--local"]
+
+  # Redis for caching and state management
   redis:
     image: redis:7-alpine
     container_name: barter-redis
     restart: unless-stopped
     ports:
-      - "16379:6379"  # Using 16379 to avoid conflicts
+      - "6379:6379"
     volumes:
       - redis-data:/data
     networks:
       - barter-network
-    command: redis-server --appendonly yes
+    command: ["redis-server", "--appendonly", "yes"]
 
-  # Optional: PostgreSQL for storing trade history
+  # PostgreSQL for trade history and analytics
   postgres:
     image: postgres:15-alpine
     container_name: barter-postgres
     restart: unless-stopped
     environment:
-      - POSTGRES_USER=barter
-      - POSTGRES_PASSWORD=barter_secure_pwd_2024
-      - POSTGRES_DB=barter_trading
+      - POSTGRES_DB=barter
+      - POSTGRES_USER=${POSTGRES_USER:-barter}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-barter_secret}
     ports:
-      - "15432:5432"  # Using 15432 to avoid conflicts
+      - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./sql/init.sql:/docker-entrypoint-initdb.d/init.sql
     networks:
       - barter-network
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U barter"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
-  # Optional: Grafana for monitoring
+  # Grafana for monitoring
   grafana:
     image: grafana/grafana:latest
     container_name: barter-grafana
     restart: unless-stopped
     environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin_barter_2024
-      - GF_SERVER_HTTP_PORT=3000
+      - GF_SECURITY_ADMIN_USER=${GRAFANA_USER:-admin}
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_INSTALL_PLUGINS=redis-datasource
     ports:
-      - "13000:3000"  # Using 13000 to avoid conflicts
+      - "3000:3000"
     volumes:
       - grafana-data:/var/lib/grafana
-      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
-      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
     networks:
       - barter-network
+    depends_on:
+      - prometheus
+
+  # Prometheus for metrics collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: barter-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    networks:
+      - barter-network
+
+  # Optional: Jupyter notebook for analysis
+  jupyter:
+    image: jupyter/scipy-notebook:latest
+    container_name: barter-jupyter
+    restart: unless-stopped
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-barter_jupyter}
+    ports:
+      - "8888:8888"
+    volumes:
+      - ./notebooks:/home/jovyan/work
+      - ./data:/home/jovyan/data:ro
+    networks:
+      - barter-network
+    profiles:
+      - analysis
 
 networks:
   barter-network:
     driver: bridge
-    name: barter-network
 
 volumes:
+  fluvio-data:
   redis-data:
   postgres-data:
   grafana-data:
+  prometheus-data:
