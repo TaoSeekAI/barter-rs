@@ -1,0 +1,89 @@
+version: '3.8'
+
+services:
+  barter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: barter-trading
+    restart: unless-stopped
+    environment:
+      - RUST_LOG=info
+      - RUST_BACKTRACE=1
+    volumes:
+      - ./config:/home/appuser/config:ro
+      - ./data:/home/appuser/data
+      - ./logs:/home/appuser/logs
+    ports:
+      - "18080:8080"  # Using 18080 to avoid conflicts
+    networks:
+      - barter-network
+    healthcheck:
+      test: ["CMD", "pgrep", "barter"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Redis for caching market data
+  redis:
+    image: redis:7-alpine
+    container_name: barter-redis
+    restart: unless-stopped
+    ports:
+      - "16379:6379"  # Using 16379 to avoid conflicts
+    volumes:
+      - redis-data:/data
+    networks:
+      - barter-network
+    command: redis-server --appendonly yes
+
+  # Optional: PostgreSQL for storing trade history
+  postgres:
+    image: postgres:15-alpine
+    container_name: barter-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=barter
+      - POSTGRES_PASSWORD=barter_secure_pwd_2024
+      - POSTGRES_DB=barter_trading
+    ports:
+      - "15432:5432"  # Using 15432 to avoid conflicts
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - barter-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U barter"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Grafana for monitoring
+  grafana:
+    image: grafana/grafana:latest
+    container_name: barter-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin_barter_2024
+      - GF_SERVER_HTTP_PORT=3000
+    ports:
+      - "13000:3000"  # Using 13000 to avoid conflicts
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    networks:
+      - barter-network
+
+networks:
+  barter-network:
+    driver: bridge
+    name: barter-network
+
+volumes:
+  redis-data:
+  postgres-data:
+  grafana-data:
