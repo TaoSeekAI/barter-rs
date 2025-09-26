@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y \
 WORKDIR /usr/src/barter
 
 # Copy manifest files
-COPY Cargo.toml Cargo.lock ./
+COPY Cargo.toml ./
 COPY barter/Cargo.toml ./barter/
 COPY barter-data/Cargo.toml ./barter-data/
 COPY barter-execution/Cargo.toml ./barter-execution/
