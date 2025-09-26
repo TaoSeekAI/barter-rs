@@ -34,16 +34,16 @@ rust_decimal = { workspace = true }
 chrono = { workspace = true }
 derive_more = { workspace = true }
 
-# Message queue
-fluvio = { version = "0.22", features = ["rustls"] }
-fluvio-future = { version = "0.7" }
+# Message queue (temporarily disabled due to version conflicts)
+# fluvio = { version = "0.22", features = ["rustls"] }
+# fluvio-future = { version = "0.7" }
 
-# AI/ML inference
-candle-core = { version = "0.7" }
-candle-transformers = { version = "0.7" }
-candle-nn = { version = "0.7" }
-hf-hub = { version = "0.3", features = ["tokio"] }
-tokenizers = { version = "0.20", features = ["http"] }
+# AI/ML inference (temporarily disabled due to compilation issues)
+# candle-core = { version = "0.7" }
+# candle-transformers = { version = "0.7" }
+# candle-nn = { version = "0.7" }
+# hf-hub = { version = "0.3", features = ["tokio"] }
+# tokenizers = { version = "0.20", features = ["http"] }
 
 # Technical indicators
 ta = { version = "0.5" }
