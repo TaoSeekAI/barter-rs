@@ -40,6 +40,9 @@ pub mod on_disconnect;
 /// `TradingState` gets set to `TradingState::Disabled`.
 pub mod on_trading_disabled;
 
+/// Volume breakout strategy that detects sudden volume surges and generates trading signals.
+pub mod volume_breakout;
+
 /// Naive implementation of all strategy interfaces.
 ///
 /// *THIS IS FOR DEMONSTRATION PURPOSES ONLY, NEVER USE FOR REAL TRADING OR IN PRODUCTION*.
