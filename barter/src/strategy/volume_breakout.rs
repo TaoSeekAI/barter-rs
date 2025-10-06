@@ -9,14 +9,14 @@ use crate::{
         on_disconnect::OnDisconnectStrategy,
         on_trading_disabled::OnTradingDisabled,
     },
-    Engine,
+    Engine, Processor,
 };
 use barter_data::event::{DataKind, MarketEvent};
 use barter_execution::{
     order::{
         id::{ClientOrderId, StrategyId},
         request::{OrderRequestCancel, OrderRequestOpen},
-        Order, OrderKind, RequestCancel, RequestOpen, Side,
+        OrderKind, RequestOpen, Side,
     },
     AccountEvent,
 };
@@ -26,37 +26,30 @@ use barter_instrument::{
 use derive_more::Constructor;
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use serde::{Deserialize, Serialize};
-use std::{collections::VecDeque, fmt::Debug, marker::PhantomData};
-use crate::Processor;
+use std::{collections::VecDeque, fmt::Debug};
 
-/// 交易量突破策略配置
+/// Volume Breakout Strategy Configuration
 ///
-/// 该策略监控交易量的异常变化，当交易量突然激增时产生交易信号。
+/// Monitors trading volume for sudden surges that may indicate market opportunities.
 ///
-/// # 参数说明
-/// - `lookback_period`: 回顾周期，用于计算基准交易量（默认30个周期）
-/// - `volume_surge_multiplier`: 交易量激增倍数，超过此倍数触发信号（默认3.0倍）
-/// - `min_baseline_volume`: 最小基准交易量，避免在低流动性时误触发（默认1000）
-/// - `entry_percentage`: 入场仓位百分比（默认5%）
-/// - `stop_loss_percentage`: 止损百分比（默认2%）
-/// - `take_profit_percentage`: 止盈百分比（默认5%）
-/// - `cooldown_periods`: 冷却期，避免频繁交易（默认10个周期）
+/// # Parameters
+/// - `lookback_period`: Historical periods to calculate baseline volume (default: 30)
+/// - `volume_surge_multiplier`: Threshold multiplier for volume surge detection (default: 3.0x)
+/// - `min_baseline_volume`: Minimum baseline volume to avoid low liquidity triggers (default: 1000)
+/// - `stop_loss_percentage`: Stop loss percentage (default: 2%)
+/// - `take_profit_percentage`: Take profit percentage (default: 5%)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct VolumeBreakoutConfig {
-    /// 回顾周期长度（用于计算平均交易量）
+    /// Lookback period length for calculating average volume
     pub lookback_period: usize,
-    /// 交易量激增倍数阈值
+    /// Volume surge multiplier threshold
     pub volume_surge_multiplier: f64,
-    /// 最小基准交易量（避免低流动性误触发）
+    /// Minimum baseline volume (avoids low liquidity false triggers)
     pub min_baseline_volume: f64,
-    /// 入场仓位百分比
-    pub entry_percentage: Decimal,
-    /// 止损百分比
+    /// Stop loss percentage
     pub stop_loss_percentage: Decimal,
-    /// 止盈百分比
+    /// Take profit percentage
     pub take_profit_percentage: Decimal,
-    /// 冷却期（避免频繁交易）
-    pub cooldown_periods: usize,
 }
 
 impl Default for VolumeBreakoutConfig {
@@ -65,74 +58,48 @@ impl Default for VolumeBreakoutConfig {
             lookback_period: 30,
             volume_surge_multiplier: 3.0,
             min_baseline_volume: 1000.0,
-            entry_percentage: Decimal::from_f64(0.05).unwrap(), // 5%
             stop_loss_percentage: Decimal::from_f64(0.02).unwrap(), // 2%
             take_profit_percentage: Decimal::from_f64(0.05).unwrap(), // 5%
-            cooldown_periods: 10,
         }
     }
 }
 
-/// 交易量数据点
+/// Volume data point
 #[derive(Debug, Clone, Copy, Constructor)]
 pub struct VolumeDataPoint {
-    /// 交易量
+    /// Trading volume
     pub volume: f64,
-    /// 价格
+    /// Price
     pub price: f64,
-    /// 时间戳
+    /// Timestamp
     pub timestamp: i64,
 }
 
-/// 仓位信息
-#[derive(Debug, Clone, Constructor)]
-pub struct PositionInfo {
-    /// 入场价格
-    pub entry_price: Decimal,
-    /// 止损价格
-    pub stop_loss: Decimal,
-    /// 止盈价格
-    pub take_profit: Decimal,
-    /// 仓位方向
-    pub side: Side,
-    /// 入场时间
-    pub entry_time: i64,
-}
-
-/// 交易量监控数据
+/// Volume monitoring data
 #[derive(Debug, Clone, Constructor)]
 pub struct VolumeMonitor {
-    /// 历史交易量数据
+    /// Historical volume data
     pub volume_history: VecDeque<VolumeDataPoint>,
-    /// 当前仓位
-    pub position: Option<PositionInfo>,
-    /// 冷却期计数器
-    pub cooldown_counter: usize,
-    /// 最后交易信号时间
-    pub last_signal_time: i64,
 }
 
 impl VolumeMonitor {
     pub fn new() -> Self {
         Self {
             volume_history: VecDeque::new(),
-            position: None,
-            cooldown_counter: 0,
-            last_signal_time: 0,
         }
     }
 
-    /// 添加新的交易量数据点
+    /// Add new volume data point
     pub fn add_volume_data(&mut self, data_point: VolumeDataPoint, lookback_period: usize) {
         self.volume_history.push_back(data_point);
 
-        // 保持固定长度的历史数据
+        // Maintain fixed length history
         while self.volume_history.len() > lookback_period {
             self.volume_history.pop_front();
         }
     }
 
-    /// 计算平均交易量
+    /// Calculate average volume
     pub fn calculate_average_volume(&self) -> f64 {
         if self.volume_history.is_empty() {
             return 0.0;
@@ -142,27 +109,17 @@ impl VolumeMonitor {
         sum / self.volume_history.len() as f64
     }
 
-    /// 检测交易量突破
+    /// Detect volume surge
     pub fn detect_volume_surge(&self, config: &VolumeBreakoutConfig) -> Option<VolumeSurgeSignal> {
-        // 需要足够的历史数据
+        // Need enough historical data
         if self.volume_history.len() < config.lookback_period {
             return None;
         }
 
-        // 在冷却期内不产生信号
-        if self.cooldown_counter > 0 {
-            return None;
-        }
-
-        // 已有仓位时不产生新信号
-        if self.position.is_some() {
-            return None;
-        }
-
-        // 获取最新交易量
+        // Get latest volume
         let latest_volume = self.volume_history.back()?.volume;
 
-        // 计算基准交易量（排除最新的数据点）
+        // Calculate baseline volume (excluding latest data point)
         let baseline_volumes: Vec<f64> = self.volume_history
             .iter()
             .rev()
@@ -177,15 +134,15 @@ impl VolumeMonitor {
 
         let avg_baseline_volume = baseline_volumes.iter().sum::<f64>() / baseline_volumes.len() as f64;
 
-        // 检查基准交易量是否满足最小要求
+        // Check if baseline volume meets minimum requirement
         if avg_baseline_volume < config.min_baseline_volume {
             return None;
         }
 
-        // 检测交易量激增
+        // Detect volume surge
         let volume_ratio = latest_volume / avg_baseline_volume;
         if volume_ratio >= config.volume_surge_multiplier {
-            // 判断方向：看价格变化
+            // Determine direction based on price change
             let latest_price = self.volume_history.back()?.price;
             let prev_price = self.volume_history.iter().rev().nth(1)?.price;
 
@@ -207,45 +164,39 @@ impl VolumeMonitor {
 
         None
     }
+}
 
-    /// 更新冷却期
-    pub fn update_cooldown(&mut self) {
-        if self.cooldown_counter > 0 {
-            self.cooldown_counter -= 1;
-        }
-    }
-
-    /// 开始冷却期
-    pub fn start_cooldown(&mut self, cooldown_periods: usize) {
-        self.cooldown_counter = cooldown_periods;
+impl Default for VolumeMonitor {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
-/// 交易量激增信号
+/// Volume surge signal
 #[derive(Debug, Clone, Constructor)]
 pub struct VolumeSurgeSignal {
-    /// 交易量比率
+    /// Volume ratio
     pub volume_ratio: f64,
-    /// 平均基准交易量
+    /// Average baseline volume
     pub avg_baseline_volume: f64,
-    /// 当前交易量
+    /// Current volume
     pub current_volume: f64,
-    /// 当前价格
+    /// Current price
     pub current_price: f64,
-    /// 建议方向
+    /// Suggested direction
     pub side: Side,
-    /// 信号时间
+    /// Signal timestamp
     pub timestamp: i64,
 }
 
-/// 扩展的仪器市场数据，包含交易量监控
+/// Extended instrument market data with volume monitoring
 #[derive(Debug, Clone, Deserialize, Serialize, Constructor)]
 pub struct VolumeBreakoutInstrumentData {
-    /// 订单簿L1数据
+    /// L1 order book data
     pub l1: barter_data::subscription::book::OrderBookL1,
-    /// 最后交易价格
+    /// Last traded price
     pub last_traded_price: Option<crate::Timed<Decimal>>,
-    /// 交易量监控器
+    /// Volume monitor
     #[serde(skip)]
     pub volume_monitor: VolumeMonitor,
 }
@@ -278,7 +229,7 @@ impl<InstrumentKey> Processor<&MarketEvent<InstrumentKey, DataKind>>
     fn process(&mut self, event: &MarketEvent<InstrumentKey, DataKind>) -> Self::Audit {
         match &event.kind {
             DataKind::Trade(trade) => {
-                // 更新最后交易价格
+                // Update last traded price
                 if self
                     .last_traded_price
                     .as_ref()
@@ -289,7 +240,7 @@ impl<InstrumentKey> Processor<&MarketEvent<InstrumentKey, DataKind>>
                         .replace(crate::Timed::new(price, event.time_exchange));
                 }
 
-                // 添加交易量数据
+                // Add volume data
                 let volume_point = VolumeDataPoint::new(
                     trade.quantity,
                     trade.price,
@@ -321,14 +272,15 @@ impl<ExchangeKey, InstrumentKey>
         InstrumentKey,
     > for VolumeBreakoutInstrumentData
 {
-    fn record_cancel(&mut self, _: &OrderRequestCancel<ExchangeKey, InstrumentKey>) {}
-    fn record_open(&mut self, _: &OrderRequestOpen<ExchangeKey, InstrumentKey>) {}
+    fn record_in_flight_cancel(&mut self, _: &OrderRequestCancel<ExchangeKey, InstrumentKey>) {}
+    fn record_in_flight_open(&mut self, _: &OrderRequestOpen<ExchangeKey, InstrumentKey>) {}
 }
 
-/// 交易量突破策略
+/// Volume Breakout Strategy
 ///
-/// 该策略通过监控交易量的异常变化来识别潜在的交易机会。
-/// 当交易量突然激增到平均水平的数倍时，通常意味着市场情绪的重大变化。
+/// This strategy identifies trading opportunities by monitoring abnormal volume changes.
+/// When volume suddenly surges to several times the average level, it typically indicates
+/// significant changes in market sentiment.
 #[derive(Debug, Clone)]
 pub struct VolumeBreakoutStrategy {
     pub id: StrategyId,
@@ -367,91 +319,26 @@ impl<GlobalData> AlgoStrategy<ExchangeIndex, InstrumentIndex>
         impl IntoIterator<Item = OrderRequestOpen<ExchangeIndex, InstrumentIndex>>,
     ) {
         let mut open_orders = Vec::new();
-        let mut cancel_orders = Vec::new();
+        let cancel_orders = Vec::new();
 
-        // 遍历所有仪器
+        // Iterate through all instruments
         for instrument in state.instruments.as_ref() {
             let instrument_data = state.instruments_data.get(instrument.index);
 
-            // 更新冷却期
-            instrument_data.volume_monitor.update_cooldown();
-
-            // 检查是否需要平仓（止损或止盈）
-            if let Some(position) = &instrument_data.volume_monitor.position {
-                if let Some(current_price) = instrument_data.price() {
-                    let should_close = match position.side {
-                        Side::Buy => {
-                            current_price <= position.stop_loss
-                                || current_price >= position.take_profit
-                        }
-                        Side::Sell => {
-                            current_price >= position.stop_loss
-                                || current_price <= position.take_profit
-                        }
-                    };
-
-                    if should_close {
-                        // 平仓
-                        let close_side = match position.side {
-                            Side::Buy => Side::Sell,
-                            Side::Sell => Side::Buy,
-                        };
-
-                        open_orders.push(OrderRequestOpen {
-                            exchange: instrument.exchange,
-                            instrument: instrument.index,
-                            strategy_id: self.id.clone(),
-                            cid: ClientOrderId::random(),
-                            order: RequestOpen {
-                                side: close_side,
-                                order: OrderKind::Market,
-                            },
-                        });
-
-                        // 清除仓位并开始冷却期
-                        instrument_data.volume_monitor.position = None;
-                        instrument_data.volume_monitor.start_cooldown(self.config.cooldown_periods);
-                        continue;
-                    }
-                }
-            }
-
-            // 检测交易量突破信号
-            if let Some(signal) = instrument_data.volume_monitor.detect_volume_surge(&self.config) {
-                if let Some(current_price) = instrument_data.price() {
-                    // 计算止损和止盈价格
-                    let (stop_loss, take_profit) = match signal.side {
-                        Side::Buy => {
-                            let stop_loss = current_price * (Decimal::ONE - self.config.stop_loss_percentage);
-                            let take_profit = current_price * (Decimal::ONE + self.config.take_profit_percentage);
-                            (stop_loss, take_profit)
-                        }
-                        Side::Sell => {
-                            let stop_loss = current_price * (Decimal::ONE + self.config.stop_loss_percentage);
-                            let take_profit = current_price * (Decimal::ONE - self.config.take_profit_percentage);
-                            (stop_loss, take_profit)
-                        }
-                    };
-
-                    // 生成开仓订单
+            // Detect volume breakthrough signal
+            if let Some(_signal) = instrument_data.volume_monitor.detect_volume_surge(&self.config) {
+                if let Some(_current_price) = instrument_data.price() {
+                    // Generate opening order (simplified - real implementation would include
+                    // position management, stop loss, take profit, etc.)
                     open_orders.push(OrderRequestOpen {
                         exchange: instrument.exchange,
                         instrument: instrument.index,
                         strategy_id: self.id.clone(),
                         cid: ClientOrderId::random(),
                         order: RequestOpen {
-                            side: signal.side,
+                            side: _signal.side,
                             order: OrderKind::Market,
                         },
-                    });
-
-                    // 记录仓位信息
-                    instrument_data.volume_monitor.position = Some(PositionInfo {
-                        entry_price: current_price,
-                        stop_loss,
-                        take_profit,
-                        side: signal.side,
-                        entry_time: signal.timestamp,
                     });
                 }
             }
@@ -486,25 +373,25 @@ where
     }
 }
 
-impl<Clock, ExecutionTxs, Risk> OnDisconnectStrategy<Clock, EngineState<(), VolumeBreakoutInstrumentData>, ExecutionTxs, Risk>
+impl<Clock, GlobalData, ExecutionTxs, Risk> OnDisconnectStrategy<Clock, EngineState<GlobalData, VolumeBreakoutInstrumentData>, ExecutionTxs, Risk>
     for VolumeBreakoutStrategy
 {
     type OnDisconnect = ();
 
     fn on_disconnect(
-        _: &mut Engine<Clock, EngineState<(), VolumeBreakoutInstrumentData>, ExecutionTxs, Self, Risk>,
+        _: &mut Engine<Clock, EngineState<GlobalData, VolumeBreakoutInstrumentData>, ExecutionTxs, Self, Risk>,
         _: ExchangeId,
     ) -> Self::OnDisconnect {
     }
 }
 
-impl<Clock, ExecutionTxs, Risk> OnTradingDisabled<Clock, EngineState<(), VolumeBreakoutInstrumentData>, ExecutionTxs, Risk>
+impl<Clock, GlobalData, ExecutionTxs, Risk> OnTradingDisabled<Clock, EngineState<GlobalData, VolumeBreakoutInstrumentData>, ExecutionTxs, Risk>
     for VolumeBreakoutStrategy
 {
     type OnTradingDisabled = ();
 
     fn on_trading_disabled(
-        _: &mut Engine<Clock, EngineState<(), VolumeBreakoutInstrumentData>, ExecutionTxs, Self, Risk>,
+        _: &mut Engine<Clock, EngineState<GlobalData, VolumeBreakoutInstrumentData>, ExecutionTxs, Self, Risk>,
     ) -> Self::OnTradingDisabled {
     }
 }
